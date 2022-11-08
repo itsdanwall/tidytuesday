@@ -36,3 +36,5 @@ vignettes/*.pdf
 *.knit.md
 .Rproj.user
 tidytuesday_github.Rproj
+data/2022/2022-11-08/us-county-boundaries.geojson
+data/2022/2022-11-08/FM_service_contour_current.txt

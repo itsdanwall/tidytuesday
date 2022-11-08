@@ -1,0 +1,361 @@
+---
+title: "TidyTuesday"
+author: "DanWall"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(purrr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(janitor)
+library(rvest)
+
+tuesdata <- tidytuesdayR::tt_load('2022-11-08')
+state_stations <- tuesdata$state_stations
+station_info <- tuesdata$station_info
+
+```
+
+
+```{r}
+raw_contour <- read_delim(
+  "FM_service_contour_current.txt",
+  delim = "|"
+)
+
+conv_contour <- raw_contour |>
+  select(-last_col()) |>
+  set_names(nm = c(
+    "application_id", "service", "lms_application_id", "dts_site_number", "transmitter_site",
+    glue::glue("deg_{0:360}")
+  ))
+
+lng_contour <- conv_contour |>
+  separate(
+    transmitter_site, 
+    into = c("site_lat", "site_long"), 
+    sep = " ,") |>
+  pivot_longer(
+    names_to = "angle",
+    values_to = "values",
+    cols = deg_0:deg_360
+  ) |>
+  mutate(
+    angle = str_remove(angle, "deg_"),
+    angle = as.integer(angle)
+  ) |>
+  separate(
+    values,
+    into = c("deg_lat", "deg_lng"),
+    sep = " ,"
+  )
+  
+```
+
+```{r}
+# View(lng_contour %>% head(n = 1e6))
+
+```
+
+Ideas:
+
+Create a topographical map that has heights which show the number of radio stations that can be heard at that location
+
+```{r}
+library(rayshader)
+library(maps)
+library(sf)
+
+lonlat_to_state <- function(pointsDF,
+                            states = spData::us_states,
+                            name_col = "NAME") {
+    ## Convert points data.frame to an sf POINTS object
+    pts <- st_as_sf(pointsDF, coords = 1:2, crs = 4326)
+
+    ## Transform spatial data to some planar coordinate system
+    ## (e.g. Web Mercator) as required for geometric operations
+    states <- st_transform(states, crs = 3857)
+    pts <- st_transform(pts, crs = 3857)
+
+    ## Find names of state (if any) intersected by each point
+    state_names <- states[[name_col]]
+    ii <- as.integer(st_intersects(pts, states))
+    state_names[ii]
+}
+
+alabama_lngs <- lng_contour %>% filter (deg_lat>30, deg_lat< 35.1, deg_lng < -90, deg_lng > -80) 
+
+
+alabama_lngs$state <- alabama_lngs %>% 
+  select(deg_lng, deg_lat) %>% 
+  na.omit() %>% 
+  rename(x = deg_lng, y = deg_lat) %>% 
+  lonlat_to_state()
+  
+alabama_lngs <- alabama_lngs %>% 
+  filter(state == "Alabama")
+```
+
+
+```{r}
+library(geojsonsf)
+
+county_bounds <- geojsonsf::geojson_sf( "us-county-boundaries.geojson")
+
+county_bounds <- st_transform(county_bounds, crs = 3857)
+
+county_bounds_alabama <- county_bounds %>% 
+  filter(state_name == "Alabama")
+
+lonlat_to_county <- function(pointsDF,
+                            counties = county_bounds_alabama,
+                            name_col = "name") {
+    ## Convert points data.frame to an sf POINTS object
+    pts <- st_as_sf(pointsDF, coords = 1:2, crs = 4326)
+
+    ## Transform spatial data to some planar coordinate system
+    ## (e.g. Web Mercator) as required for geometric operations
+    counties <- st_transform(counties, crs = 3857)
+    pts <- st_transform(pts, crs = 3857)
+
+    ## Find names of state (if any) intersected by each point
+    county_names <- counties[[name_col]]
+    ii <- as.integer(st_intersects(pts, counties))
+    county_names[ii]
+}
+
+
+```
+
+
+```{r}
+alabama_lngs$county <- alabama_lngs %>% 
+  select(deg_lng, deg_lat) %>% 
+  na.omit() %>% 
+  rename(x = deg_lng, y = deg_lat) %>% 
+  lonlat_to_county()
+  
+```
+
+
+```{r}
+alabama_county_nstation <- alabama_lngs %>% 
+  filter(state == "Alabama") %>% 
+  group_by(application_id, county) %>% 
+  sample_n(1) %>% 
+  group_by(county) %>% 
+  count() %>% 
+  filter(!is.na(county)) %>% 
+  mutate(county = str_replace(county, "DeKalb", "De Kalb") %>% 
+           str_replace("St. Clair", "St Clair"))
+```
+
+
+```{r}
+# county_map <- map_data("county") %>%
+#   filter(region == "alabama") %>% 
+#   mutate(county = str_to_title(subregion))
+
+```
+
+```{r}
+# rownames(alabama_county_nstation) <- alabama_county_nstation$county
+ 
+ggplot(alabama_county_nstation, aes(map_id = county)) +
+  geom_map(aes(fill = n), map = county_map) +
+  coord_sf(crs = 5070, default_crs = 4326, 
+           xlim = c (-90, -80), ylim = c(30, 35.1))
+```
+
+
+```{r}
+# library(ggplot2)
+# # wr <- map_data("world")
+# library(ggplot2)
+county_map2 <- map("county", plot = FALSE, fill = TRUE)
+
+county_map2sf <- st_as_sf(county_map2)
+county_map2sf_alabama <- county_map2sf %>%
+  separate(
+    ID, 
+    into = c("state", "county"), 
+    sep = ",") %>% 
+  filter(state == "alabama") %>% 
+  mutate(county = str_to_title(county))
+  
+
+ggplot() + geom_sf(data = county_map2sf_alabama)
+
+county_map2sf_alabama2 <- county_map2sf_alabama %>% left_join(alabama_county_nstation)
+
+county_level_plot <- ggplot(county_map2sf_alabama) + 
+  geom_sf(aes(fill = n), data = county_map2sf_alabama2)
+
+# ggplot() +
+#   geom_map(aes(map_id = region), map = wr, data = wr) +
+#   expand_limits(x = wr$long, y = wr$lat)
+
+# ggplot() +
+#   geom_map(aes(map_id = subregion), map = county_map, data = county_map) +
+#   expand_limits(x = county_map$long, y = county_map$lat)
+county_level_plot
+```
+
+```{r}
+library(rayshader)
+county_level_plot <- county_level_plot +    
+  scale_fill_viridis_b() +
+  theme(legend.position = "none", 
+        axis.line=element_blank(), 
+        axis.text.x=element_blank(), axis.title.x=element_blank(),
+        axis.text.y=element_blank(), axis.title.y=element_blank(),
+        axis.ticks=element_blank(), 
+        panel.background = element_blank()) 
+
+
+county_level_rayshader <- county_level_plot %>% 
+  rayshader::plot_gg()
+```
+
+
+```{r}
+# render_snapshot("alabama")
+```
+
+
+
+
+
+# Old code
+```{r}
+View(us_map(regions = "county", include = c("AL")))
+
+plot_usmap(regions = "counties") + 
+  labs(title = "US Counties",
+       subtitle = "This is a blank map of the counties of the United States.") + 
+  theme(panel.background = element_rect(color = "black", fill = "lightblue"))
+
+
+alabama_map <- us_map(regions = "county", include = c("AL")) %>% 
+  mutate(id = county)
+
+
+
+# myPoints <- structure(list(N = c(7.34e+20, 1e+18, 1.471e+21, 1.35e+21, 2.096e+21
+# ), latitude = c(35.060137, 42.151816, 34.420986, 39.713209, 32.445652
+# ), longitude = c(-93.133718, -71.77203, -92.530547, -75.661478, 
+#                  -93.739031)), row.names = c(NA, -5L), 
+# class = c("data.table",  "data.frame"))
+# 
+# 
+# gg1 <- ggplot() +
+#        geom_map(data = us, map = us, aes(x = long, y = lat, map_id = region),
+#                 fill = "#ffffff", color = "#ffffff", size = 0.15) + 
+#        geom_point(data = test, aes(x = longitude, y = latitude, color = N), inherit.aes = F) +
+#        theme(legend.position = "none")
+
+```
+```{r}
+
+
+```
+
+
+```{r}
+library(usmap)
+
+# What Alabama county are these coordinates in  33.85315 -86.45573 
+
+# alabama_counties <- us_map(regions = "county", include = c("AL"))
+# 
+# counties <- st_as_sf(alabama_counties %>% select(y, x, county), coords = 1:2, crs = "NAD83" )
+# counties_transform <- st_transform(counties, crs = 3857)
+# st_crs(counties)
+# 
+# counties_polys = counties %>% 
+#   select(county, geometry) %>% 
+#   dplyr::group_by(county) %>% 
+#   dplyr::summarise() %>%
+#   st_cast("POLYGON") %>% 
+#   st_cast("MULTIPOLYGON")
+# 
+# testPoints <- data.frame(x = c(-86.51747), y = c(33.69536))
+# pts <- st_as_sf(testPoints, coords = 1:2, crs = 4326)
+# 
+# pts <- st_transform(pts, crs = 3857)
+# 
+# county_names <- counties_polys[["county"]]
+# 
+# st_intersects(pts, counties_polys)
+```
+
+
+```{r}
+county_bounds_alabama %>% 
+  geom_sf()
+```
+
+
+```{r}
+
+alabama_map <- us_map(regions = "county", include = c("AL")) %>% 
+  mutate(county = county %>% str_remove(" County"),
+         id = county)
+
+
+
+# without geospatial coordinate system, the resulting plot
+# looks weird
+ggplot() +
+  geom_map(aes(fill = Murder), map = county_map) +
+  # crs = 5070 is a Conus Albers projection for North America,
+  #   see: https://epsg.io/5070
+  # default_crs = 4326 tells coord_sf() that the input map data
+  #   are in longitude-latitude format
+
+```
+
+
+
+
+```{r}
+
+
+
+states <- st_transform(states, crs = 3857)
+
+testPoints <- data.frame(x = c(-90, -120, -165	), y = c(44, 44, 54))
+  pts <- st_as_sf(testPoints, coords = 1:2, crs = 4326)
+states = spData::us_states
+
+states <- st_transform(states, crs = 3857)
+pts <- st_transform(pts, crs = 3857)
+
+st_intersects(pts, states)
+
+lonlat_to_state <- function(pointsDF,
+                            states = spData::us_states,
+                            name_col = "NAME") {
+    ## Convert points data.frame to an sf POINTS object
+    pts <- st_as_sf(pointsDF, coords = 1:2, crs = 4326)
+
+    ## Transform spatial data to some planar coordinate system
+    ## (e.g. Web Mercator) as required for geometric operations
+    states <- st_transform(states, crs = 3857)
+    pts <- st_transform(pts, crs = 3857)
+
+    ## Find names of state (if any) intersected by each point
+    state_names <- states[[name_col]]
+    ii <- as.integer(st_intersects(pts, states))
+    state_names[ii]
+}
+
+
+
+
+```
